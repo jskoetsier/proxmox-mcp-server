@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "node:http";
+import { Agent } from "node:https";
 import { ZodError, z } from "zod";
 import axios, { AxiosError } from "axios";
 
@@ -25,7 +26,7 @@ const API_BASE = `https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json`;
 // Type definitions for Proxmox API responses
 interface ProxmoxResponse<T> {
   data?: T;
-  errors?: string[];
+  errors?: Record<string, string>;
 }
 
 interface Ticket {
@@ -223,7 +224,7 @@ async function getTicket(): Promise<Ticket> {
         validateStatus: () => true,
         httpsAgent: PROXMOX_VERIFY_SSL
           ? undefined
-          : new (require("https").Agent)({ rejectUnauthorized: false }),
+          : new Agent({ rejectUnauthorized: false }),
       }
     );
 
@@ -251,33 +252,44 @@ async function makeRequest<T>(
     },
     httpsAgent: PROXMOX_VERIFY_SSL
       ? undefined
-      : new (require("https").Agent)({ rejectUnauthorized: false }),
+      : new Agent({ rejectUnauthorized: false }),
   };
 
+  let response;
   try {
-    const response = await axios.request<ProxmoxResponse<T>>({
+    response = await axios.request<ProxmoxResponse<T>>({
       method,
       url: `${API_BASE}${endpoint}`,
-      data,
+      // DELETE params go as query string; POST/PUT as request body
+      ...(method === "delete" ? { params: data } : { data }),
       ...config,
       validateStatus: () => true,
     });
-
-    if (response.data?.data !== undefined) {
-      return response.data.data;
-    }
-    
-    throw new Error(
-      response.data?.errors?.[0] ||
-        `Request failed with status ${response.status}`
-    );
   } catch (error) {
     const axiosError = error as AxiosError;
-    const errors = axiosError.response?.data as { errors?: string[] } | undefined;
-    throw new Error(
-      `Proxmox API error: ${errors?.errors?.[0] || axiosError.message}`
-    );
+    const responseData = axiosError.response?.data as { errors?: Record<string, string> } | undefined;
+    const errors = responseData?.errors;
+    const errorMsg = errors
+      ? Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ')
+      : axiosError.message;
+    throw new Error(`Proxmox API error: ${errorMsg}`);
   }
+
+  if (response.data?.data !== undefined) {
+    return response.data.data;
+  }
+
+  // Check if this is an error response (no data but has errors or non-2xx status)
+  if (response.status >= 400 || response.data?.errors) {
+    const errors = response.data?.errors;
+    const errorMsg = errors
+      ? Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ')
+      : `Request failed with status ${response.status}`;
+    throw new Error(errorMsg);
+  }
+
+  // Some endpoints return no data on success (e.g. DELETE)
+  return undefined as T;
 }
 
 // ==================== Status Tools ====================
@@ -309,6 +321,40 @@ server.registerTool(
           {
             type: "text",
             text: `Error getting node status: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Get node summary
+server.registerTool(
+  "get_summary",
+  {
+    description: "Get summary of Proxmox node resources",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+    },
+  },
+  async ({ node }) => {
+    try {
+      const summary = await makeRequest<any>("get", `/nodes/${node}/summary`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(summary, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting node summary: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
         isError: true,
@@ -535,7 +581,17 @@ server.registerTool(
       if (net1) params.net1 = net1;
       if (net2) params.net2 = net2;
       if (net3) params.net3 = net3;
-      if (disk) params.disk = disk;
+      if (disk) {
+        // Parse "device: value" format (e.g., "scsi0: HDDVOL1:20,format=raw")
+        const diskMatch = disk.match(/^(scsi|virtio|sata|ide)(\d+)\s*:\s*(.+)$/);
+        if (diskMatch) {
+          const paramKey = `${diskMatch[1]}${diskMatch[2]}`;
+          if (!params[paramKey]) params[paramKey] = diskMatch[3];
+        } else {
+          // Assume it's a value for scsi0 if no device prefix
+          if (!params.scsi0) params.scsi0 = disk;
+        }
+      }
       if (ide0) params.ide0 = ide0;
       if (ide1) params.ide1 = ide1;
       if (ide2) params.ide2 = ide2;
@@ -567,41 +623,26 @@ server.registerTool(
       
       // Guest agent configuration
       if (installGuestAgent !== false) {
-        // Install qemu-guest-agent package
-        params.agent = "1";
+        // Enable QEMU guest agent
+        params.agent = "enabled=1";
       }
 
-      const result = await makeRequest<{ vmid: number }>("post", `/nodes/${node}/qemu`, params);
+      const result = await makeRequest<string>("post", `/nodes/${node}/qemu`, params);
+
+      // Proxmox returns a UPID string on success
+      if (!result) throw new Error("VM creation failed: no response from Proxmox API");
       
-      // If guest agent is enabled, install and configure it
-      if (installGuestAgent !== false) {
-        // Wait a moment for VM to start
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Start the VM if not already running
-        try {
-          await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/status/start`);
-        } catch (startError) {
-          // VM might already be running
-        }
-        
-        // Install qemu-guest-agent via cloud-init or run command
-        try {
-          // Try to run command via guest agent
-          const installCmd = "apt-get update && apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent";
-          await makeRequest<{ data: any }>("post", `/nodes/${node}/qemu/${vmid}/agent/exec`, {
-            command: installCmd,
-          });
-        } catch (installError) {
-          // Guest agent might not be available yet, skip silently
-        }
-      }
-
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, vmid: result.vmid }, null, 2),
+            text: JSON.stringify({
+              success: true,
+              vmid,
+              upid: result,
+              message: `VM ${vmid} created successfully on node ${node}. Note: VM is created in stopped state.`,
+              parameters: Object.keys(params).length
+            }, null, 2),
           },
         ],
       };
@@ -657,12 +698,15 @@ server.registerTool(
       if (unprivileged !== undefined) params.unprivileged = unprivileged ? "1" : "0";
       if (description) params.description = description;
 
-      const result = await makeRequest<{ vmid: number }>("post", `/nodes/${node}/lxc`, params);
+      const result = await makeRequest<string>("post", `/nodes/${node}/lxc`, params);
+
+      // Proxmox returns a UPID string on success
+      if (!result) throw new Error("Container creation failed: no response from Proxmox API");
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, vmid: result.vmid }, null, 2),
+            text: JSON.stringify({ success: true, vmid, upid: result }, null, 2),
           },
         ],
       };
@@ -2851,13 +2895,38 @@ server.registerTool(
   },
   async ({ node, storage }) => {
     try {
-      const endpoint = storage
-        ? `/nodes/${node}/storage/${storage}/content`
-        : `/nodes/${node}/storage`;
+      // If storage is specified, list content from that storage
+      // Otherwise, list all storages and filter for ISO files
+      let isos: any[] = [];
       
-      const result = await makeRequest<{ data: { name: string; size: number; format: string; vmid: number | null }[] }>("get", endpoint);
-      
-      const isos = (result.data || []).filter(item => item.format === 'iso' || item.name.endsWith('.iso'));
+      if (storage) {
+        // Get content from specific storage
+        const result = await makeRequest<any[]>("get", `/nodes/${node}/storage/${storage}/content`);
+        isos = result.filter(item => item.content === "iso");
+      } else {
+        // Get all storages, then get content from each
+        const storages = await makeRequest<any[]>("get", `/nodes/${node}/storage`);
+        
+        // Filter for storages that can contain ISO files
+        const isoStorages = storages.filter(s =>
+          s.content && (s.content as string).includes("iso")
+        );
+        
+        // Get ISO files from each storage
+        for (const storageItem of isoStorages) {
+          try {
+            const content = await makeRequest<any[]>("get", `/nodes/${node}/storage/${storageItem.storage}/content`);
+            const storageIsos = content.filter(item => item.content === "iso");
+            isos.push(...storageIsos.map(iso => ({
+              ...iso,
+              storage: storageItem.storage
+            })));
+          } catch (err) {
+            // Skip storage if we can't access it
+            continue;
+          }
+        }
+      }
       
       return {
         content: [
