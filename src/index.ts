@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer } from "node:http";
+import { ZodError, z } from "zod";
 import axios, { AxiosError } from "axios";
 
 // Environment variables for Proxmox configuration
@@ -3357,6 +3359,44 @@ server.registerTool(
 
 // ==================== Start Server ====================
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("Proxmox MCP server running on stdio");
+// Environment variable for HTTP port
+const HTTP_PORT = process.env.HTTP_PORT || "3333";
+
+// Check if HTTP mode is enabled
+const HTTP_MODE = process.env.HTTP_MODE === "true";
+
+if (HTTP_MODE) {
+ // HTTP transport mode for n8n compatibility
+ const http = await import("node:http");
+ 
+ // Create HTTP transport with stateless mode (no session management)
+ const transport = new StreamableHTTPServerTransport({
+   sessionIdGenerator: undefined, // Stateless mode
+ });
+ 
+ // Connect the server to the transport
+ await server.connect(transport);
+ 
+ // Create HTTP server
+ const serverHttp = http.createServer(async (req, res) => {
+   // Use transport.handleRequest to process MCP requests
+   try {
+     await transport.handleRequest(req, res);
+   } catch (error) {
+     console.error("HTTP request error:", error);
+     res.writeHead(500, { "Content-Type": "application/json" });
+     res.end(JSON.stringify({ error: "Internal server error" }));
+   }
+ });
+ 
+ serverHttp.listen(parseInt(HTTP_PORT), () => {
+   console.error(`Proxmox MCP server running on HTTP port ${HTTP_PORT}`);
+   console.error(`n8n configuration: http://localhost:${HTTP_PORT}/`);
+ });
+} else {
+ // Stdio transport mode (default)
+ const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+ const transport = new StdioServerTransport();
+ await server.connect(transport);
+ console.error("Proxmox MCP server running on stdio");
+}

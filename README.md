@@ -11,6 +11,40 @@ A Model Context Protocol (MCP) server for managing Proxmox VE (Virtual Environme
 - **ISO Management**: Download, list, and manage ISO files
 - **VM Guest Management**: SSH, set IPs, manage users (requires Proxmox guest agent)
 - **Maintenance**: Get Proxmox version, check for updates, perform upgrades
+- **Template Management**: Create and manage VM/container templates
+- **Backup and Restore**: Create and restore backups for VMs and containers
+- **HA Management**: Enable/disable High Availability for VMs and containers
+- **Migration**: Migrate VMs and containers between nodes
+- **Snapshots**: Create and manage VM/container snapshots
+- **Resource Pools**: Manage resource pools and assign VMs to them
+
+## n8n Compatibility
+
+This server supports both **stdio** and **HTTP** transports, making it compatible with n8n and other MCP clients.
+
+### HTTP Transport Mode (for n8n)
+
+To use with n8n, set the `HTTP_MODE` environment variable to `"true"`:
+
+```json
+{
+  "mcpServers": {
+    "proxmox": {
+      "command": "node",
+      "args": ["/path/to/proxmox-mcp-server/build/index.js"],
+      "env": {
+        "PROXMOX_HOST": "YOUR_PROXMOX_HOSTNAME_OR_IP",
+        "PROXMOX_USER": "YOUR_USERNAME@pam",
+        "PROXMOX_PASSWORD": "YOUR_PASSWORD",
+        "HTTP_MODE": "true",
+        "HTTP_PORT": "3333"
+      }
+    }
+  }
+}
+```
+
+n8n will connect to `http://localhost:3333/` for MCP communication.
 
 ## Prerequisites
 
