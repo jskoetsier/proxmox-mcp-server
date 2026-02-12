@@ -1,0 +1,26 @@
+{
+  "name": "proxmox-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Proxmox VE",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "start": "node build/index.js"
+  },
+  "keywords": [
+    "proxmox",
+    "mcp",
+    "virtualization"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "axios": "^1.6.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
