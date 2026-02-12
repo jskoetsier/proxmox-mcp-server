@@ -478,7 +478,7 @@ server.registerTool(
 server.registerTool(
   "create_vm",
   {
-    description: "Create a new VM on Proxmox",
+    description: "Create a new VM on Proxmox with optional cloud-init configuration",
     inputSchema: {
       node: z.string().describe("Node to create VM on"),
       vmid: z.number().describe("VM ID (unique, 100-999999999)"),
@@ -493,9 +493,19 @@ server.registerTool(
       bootdisk: z.string().optional().describe("Boot disk (e.g., 'virtio0')"),
       onboot: z.boolean().optional().describe("Start VM on boot"),
       desc: z.string().optional().describe("Description"),
+      // Cloud-init options
+      cloudinit: z.boolean().optional().describe("Enable cloud-init (default: true)"),
+      nameserver: z.string().optional().describe("DNS nameserver for cloud-init"),
+      searchdomain: z.string().optional().describe("Search domain for cloud-init"),
+      ipconfig: z.string().optional().describe("IP configuration for cloud-init (e.g., 'ip=192.168.1.100/24,gw=192.168.1.1')"),
+      sshkeys: z.string().optional().describe("SSH public keys for cloud-init"),
+      user: z.string().optional().describe("Username for cloud-init (default: 'ubuntu')"),
+      password: z.string().optional().describe("Password for cloud-init user"),
+      // Guest agent options
+      installGuestAgent: z.boolean().optional().describe("Install and enable Proxmox Guest Agent (default: true)"),
     },
   },
-  async ({ node, vmid, name, cores, sockets, memory, net0, disk, ostype, scsihw, bootdisk, onboot, desc }) => {
+  async ({ node, vmid, name, cores, sockets, memory, net0, disk, ostype, scsihw, bootdisk, onboot, desc, cloudinit, nameserver, searchdomain, ipconfig, sshkeys, user, password, installGuestAgent }) => {
     try {
       const params: Record<string, any> = { vmid, memory };
       
@@ -509,8 +519,51 @@ server.registerTool(
       if (bootdisk) params.bootdisk = bootdisk;
       if (onboot !== undefined) params.onboot = onboot ? "1" : "0";
       if (desc) params.desc = desc;
+      
+      // Cloud-init configuration
+      if (cloudinit !== false) {
+        if (nameserver) params.nameserver = nameserver;
+        if (searchdomain) params.searchdomain = searchdomain;
+        if (ipconfig) params.ipconfig0 = ipconfig;
+        if (sshkeys) params.sshkeys = sshkeys;
+        if (user) params.user = user;
+        if (password) params.password = password;
+      } else {
+        params.cloudinit = "0";
+      }
+      
+      // Guest agent configuration
+      if (installGuestAgent !== false) {
+        // Install qemu-guest-agent package
+        params.agent = "1";
+      }
 
       const result = await makeRequest<{ vmid: number }>("post", `/nodes/${node}/qemu`, params);
+      
+      // If guest agent is enabled, install and configure it
+      if (installGuestAgent !== false) {
+        // Wait a moment for VM to start
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Start the VM if not already running
+        try {
+          await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/status/start`);
+        } catch (startError) {
+          // VM might already be running
+        }
+        
+        // Install qemu-guest-agent via cloud-init or run command
+        try {
+          // Try to run command via guest agent
+          const installCmd = "apt-get update && apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent";
+          await makeRequest<{ data: any }>("post", `/nodes/${node}/qemu/${vmid}/agent/exec`, {
+            command: installCmd,
+          });
+        } catch (installError) {
+          // Guest agent might not be available yet, skip silently
+        }
+      }
+
       return {
         content: [
           {
@@ -1478,6 +1531,526 @@ server.registerTool(
           {
             type: "text",
             text: `Error getting VM interfaces: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== ISO Management Tools ====================
+
+// List ISO files on a node
+server.registerTool(
+  "list_isos",
+  {
+    description: "List ISO files on a Proxmox node",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+      storage: z.string().optional().describe("Storage name (optional)"),
+    },
+  },
+  async ({ node, storage }) => {
+    try {
+      const endpoint = storage
+        ? `/nodes/${node}/storage/${storage}/content`
+        : `/nodes/${node}/storage`;
+      
+      const result = await makeRequest<{ data: { name: string; size: number; format: string; vmid: number | null }[] }>("get", endpoint);
+      
+      const isos = (result.data || []).filter(item => item.format === 'iso' || item.name.endsWith('.iso'));
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(isos, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing ISOs: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Download ISO to a node
+server.registerTool(
+  "download_iso",
+  {
+    description: "Download an ISO file to a Proxmox node",
+    inputSchema: {
+      node: z.string().describe("Node to download ISO to"),
+      storage: z.string().describe("Storage name (e.g., 'local', 'local-lvm')"),
+      filename: z.string().describe("ISO filename (e.g., 'ubuntu-22.04.iso')"),
+      url: z.string().describe("Download URL for the ISO"),
+    },
+  },
+  async ({ node, storage, filename, url }) => {
+    try {
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/storage/${storage}/upload`, {
+        filename,
+        url,
+      });
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error downloading ISO: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete ISO from a node
+server.registerTool(
+  "delete_iso",
+  {
+    description: "Delete an ISO file from a Proxmox node",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+      storage: z.string().describe("Storage name"),
+      filename: z.string().describe("ISO filename to delete"),
+    },
+  },
+  async ({ node, storage, filename }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/storage/${storage}/content/${filename}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `ISO ${filename} deleted successfully` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting ISO: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Get ISO download status
+server.registerTool(
+  "get_iso_download_status",
+  {
+    description: "Get status of an ISO download task",
+    inputSchema: {
+      node: z.string().describe("Node where download is running"),
+      taskid: z.string().describe("Task ID from download_iso response"),
+    },
+  },
+  async ({ node, taskid }) => {
+    try {
+      const status = await makeRequest<TaskStatus>("get", `/nodes/${node}/tasks/${taskid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(status, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting download status: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== Firewall Management Tools ====================
+
+// Enable firewall for a VM
+server.registerTool(
+  "enable_vm_firewall",
+  {
+    description: "Enable firewall for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/config`, { firewall: 1 });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall enabled for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error enabling VM firewall: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Disable firewall for a VM
+server.registerTool(
+  "disable_vm_firewall",
+  {
+    description: "Disable firewall for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/config`, { firewall: 0 });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall disabled for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error disabling VM firewall: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Enable firewall for a container
+server.registerTool(
+  "enable_container_firewall",
+  {
+    description: "Enable firewall for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/lxc/${vmid}/config`, { firewall: 1 });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall enabled for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error enabling container firewall: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Disable firewall for a container
+server.registerTool(
+  "disable_container_firewall",
+  {
+    description: "Disable firewall for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/lxc/${vmid}/config`, { firewall: 0 });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall disabled for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error disabling container firewall: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create firewall rule for a VM
+server.registerTool(
+  "create_vm_firewall_rule",
+  {
+    description: "Create a firewall rule for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      rule: z.string().describe("Firewall rule (e.g., 'in,REJECT,22/tcp' or 'out,ACCEPT,any,any')"),
+      pos: z.number().optional().describe("Position for the rule (optional)"),
+    },
+  },
+  async ({ node, vmid, rule, pos }) => {
+    try {
+      const params: Record<string, any> = { rule };
+      if (pos !== undefined) params.pos = pos;
+
+      await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/firewall/rules`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall rule created for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating VM firewall rule: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create firewall rule for a container
+server.registerTool(
+  "create_container_firewall_rule",
+  {
+    description: "Create a firewall rule for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      rule: z.string().describe("Firewall rule (e.g., 'in,REJECT,22/tcp' or 'out,ACCEPT,any,any')"),
+      pos: z.number().optional().describe("Position for the rule (optional)"),
+    },
+  },
+  async ({ node, vmid, rule, pos }) => {
+    try {
+      const params: Record<string, any> = { rule };
+      if (pos !== undefined) params.pos = pos;
+
+      await makeRequest<void>("post", `/nodes/${node}/lxc/${vmid}/firewall/rules`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall rule created for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating container firewall rule: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List firewall rules for a VM
+server.registerTool(
+  "list_vm_firewall_rules",
+  {
+    description: "List firewall rules for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      const result = await makeRequest<{ data: { action: string; proto: string; dport: string; sport: string; src: string; dst: string; enabled: number }[] }>("get", `/nodes/${node}/qemu/${vmid}/firewall/rules`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing VM firewall rules: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List firewall rules for a container
+server.registerTool(
+  "list_container_firewall_rules",
+  {
+    description: "List firewall rules for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      const result = await makeRequest<{ data: { action: string; proto: string; dport: string; sport: string; src: string; dst: string; enabled: number }[] }>("get", `/nodes/${node}/lxc/${vmid}/firewall/rules`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing container firewall rules: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete firewall rule for a VM
+server.registerTool(
+  "delete_vm_firewall_rule",
+  {
+    description: "Delete a firewall rule for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      ruleid: z.string().describe("Rule ID"),
+    },
+  },
+  async ({ node, vmid, ruleid }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/qemu/${vmid}/firewall/rules/${ruleid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall rule ${ruleid} deleted for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting VM firewall rule: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete firewall rule for a container
+server.registerTool(
+  "delete_container_firewall_rule",
+  {
+    description: "Delete a firewall rule for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      ruleid: z.string().describe("Rule ID"),
+    },
+  },
+  async ({ node, vmid, ruleid }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/lxc/${vmid}/firewall/rules/${ruleid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Firewall rule ${ruleid} deleted for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting container firewall rule: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
         isError: true,
