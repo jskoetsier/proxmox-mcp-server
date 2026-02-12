@@ -486,11 +486,28 @@ server.registerTool(
       cores: z.number().min(1).max(128).optional().describe("Number of CPU cores"),
       sockets: z.number().min(1).max(16).optional().describe("Number of CPU sockets"),
       memory: z.number().min(16).describe("Memory in MB"),
-      net0: z.string().optional().describe("Network interface configuration (e.g., 'virtio=00:11:22:33:44:55,bridge=vmbr0')"),
+      // Network interface configuration
+      net0: z.string().optional().describe("Network interface 0 (e.g., 'virtio=00:11:22:33:44:55,bridge=vmbr0')"),
+      net1: z.string().optional().describe("Network interface 1"),
+      net2: z.string().optional().describe("Network interface 2"),
+      net3: z.string().optional().describe("Network interface 3"),
+      // Disk configuration
       disk: z.string().optional().describe("Disk configuration (e.g., 'virtio0: local-lvm:20')"),
-      ostype: z.string().optional().describe("OS type (e.g., 'l26', 'windows', 'macos')"),
+      ide0: z.string().optional().describe("IDE device 0 (e.g., 'local:iso/ubuntu-22.04.iso,media=cdrom')"),
+      ide1: z.string().optional().describe("IDE device 1"),
+      ide2: z.string().optional().describe("IDE device 2"),
+      ide3: z.string().optional().describe("IDE device 3"),
+      sata0: z.string().optional().describe("SATA device 0"),
+      sata1: z.string().optional().describe("SATA device 1"),
+      scsi0: z.string().optional().describe("SCSI device 0"),
+      scsi1: z.string().optional().describe("SCSI device 1"),
+      scsi2: z.string().optional().describe("SCSI device 2"),
+      scsi3: z.string().optional().describe("SCSI device 3"),
       scsihw: z.string().optional().describe("SCSI controller (e.g., 'virtio-scsi-pci')"),
       bootdisk: z.string().optional().describe("Boot disk (e.g., 'virtio0')"),
+      boot: z.string().optional().describe("Boot order (e.g., 'cdn')"),
+      // OS configuration
+      ostype: z.string().optional().describe("OS type (e.g., 'l26', 'windows', 'macos')"),
       onboot: z.boolean().optional().describe("Start VM on boot"),
       desc: z.string().optional().describe("Description"),
       // Cloud-init options
@@ -505,7 +522,7 @@ server.registerTool(
       installGuestAgent: z.boolean().optional().describe("Install and enable Proxmox Guest Agent (default: true)"),
     },
   },
-  async ({ node, vmid, name, cores, sockets, memory, net0, disk, ostype, scsihw, bootdisk, onboot, desc, cloudinit, nameserver, searchdomain, ipconfig, sshkeys, user, password, installGuestAgent }) => {
+  async ({ node, vmid, name, cores, sockets, memory, net0, net1, net2, net3, disk, ide0, ide1, ide2, ide3, sata0, sata1, scsi0, scsi1, scsi2, scsi3, scsihw, bootdisk, boot, ostype, onboot, desc, cloudinit, nameserver, searchdomain, ipconfig, sshkeys, user, password, installGuestAgent }) => {
     try {
       const params: Record<string, any> = { vmid, memory };
       
@@ -513,10 +530,24 @@ server.registerTool(
       if (cores) params.cores = cores;
       if (sockets) params.sockets = sockets;
       if (net0) params.net0 = net0;
+      if (net1) params.net1 = net1;
+      if (net2) params.net2 = net2;
+      if (net3) params.net3 = net3;
       if (disk) params.disk = disk;
-      if (ostype) params.ostype = ostype;
+      if (ide0) params.ide0 = ide0;
+      if (ide1) params.ide1 = ide1;
+      if (ide2) params.ide2 = ide2;
+      if (ide3) params.ide3 = ide3;
+      if (sata0) params.sata0 = sata0;
+      if (sata1) params.sata1 = sata1;
+      if (scsi0) params.scsi0 = scsi0;
+      if (scsi1) params.scsi1 = scsi1;
+      if (scsi2) params.scsi2 = scsi2;
+      if (scsi3) params.scsi3 = scsi3;
       if (scsihw) params.scsihw = scsihw;
       if (bootdisk) params.bootdisk = bootdisk;
+      if (boot) params.boot = boot;
+      if (ostype) params.ostype = ostype;
       if (onboot !== undefined) params.onboot = onboot ? "1" : "0";
       if (desc) params.desc = desc;
       

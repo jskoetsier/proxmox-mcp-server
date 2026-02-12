@@ -100,7 +100,7 @@ Once configured, you can use the Proxmox MCP server through your MCP client's in
 - `get_running_vms` - Get all running VMs and containers on a node
 
 ### VM Management
-- `create_vm` - Create a new VM with cloud-init and guest agent configuration
+- `create_vm` - Create a new VM with cloud-init, guest agent, and network interface configuration
 - `delete_vm` - Delete a VM
 - `start_vm` - Start a VM
 - `stop_vm` - Stop a VM
@@ -158,6 +158,21 @@ The `create_vm` tool automatically installs and configures the Proxmox Guest Age
 1. Install the Proxmox Guest Agent inside your VMs/containers
 2. For Linux VMs: `apt install qemu-guest-agent` or `yum install qemu-guest-agent`
 3. Ensure the guest agent service is running: `systemctl enable --now qemu-guest-agent`
+
+### Network Interface Configuration
+
+The `create_vm` tool supports multiple network interfaces with various configuration options:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `net0` | Network interface 0 | `virtio=00:11:22:33:44:55,bridge=vmbr0` |
+| `net1` | Network interface 1 | `e1000=00:11:22:33:44:56,bridge=vmbr1` |
+| `net2` | Network interface 2 | `rtl8139=00:11:22:33:44:57,bridge=vmbr2` |
+| `net3` | Network interface 3 | `virtio=00:11:22:33:44:58,bridge=vmbr3` |
+
+**Network interface format:** `type=MAC_ADDRESS,bridge=BRIDGE_NAME`
+
+Supported NIC types: `virtio`, `e1000`, `rtl8139`, `vmxnet3`, `ne2k_pci`, `pcnet`
 
 ### Cloud-init Configuration
 
