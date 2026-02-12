@@ -1570,6 +1570,1271 @@ server.registerTool(
   }
 );
 
+// ==================== Template Management Tools ====================
+
+// List templates on a node
+server.registerTool(
+  "list_templates",
+  {
+    description: "List templates on a Proxmox node",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+      storage: z.string().optional().describe("Storage name (optional)"),
+      type: z.enum(["vm", "lxc"]).optional().describe("Template type (vm or lxc)"),
+    },
+  },
+  async ({ node, storage, type }) => {
+    try {
+      let endpoint = `/nodes/${node}/storage`;
+      if (storage) {
+        endpoint = `/nodes/${node}/storage/${storage}/content`;
+      }
+      
+      const result = await makeRequest<{ data: { name: string; size: number; format: string; vmid: number | null; template: number }[] }>("get", endpoint);
+      
+      let templates = (result.data || []).filter(item => item.template === 1);
+      
+      if (type === "vm") {
+        templates = templates.filter(item => item.format === 'vmdk' || item.name.endsWith('.vmdk'));
+      } else if (type === "lxc") {
+        templates = templates.filter(item => item.format === 'vztmpl' || item.name.endsWith('.vztmpl'));
+      }
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(templates, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing templates: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create template from VM
+server.registerTool(
+  "create_template_from_vm",
+  {
+    description: "Create a template from a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID to convert to template"),
+      storage: z.string().optional().describe("Storage name for the template"),
+    },
+  },
+  async ({ node, vmid, storage }) => {
+    try {
+      const params: Record<string, any> = { template: 1 };
+      if (storage) params.storage = storage;
+      
+      await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Template created from VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating template: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create template from container
+server.registerTool(
+  "create_template_from_container",
+  {
+    description: "Create a template from a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID to convert to template"),
+      storage: z.string().optional().describe("Storage name for the template"),
+    },
+  },
+  async ({ node, vmid, storage }) => {
+    try {
+      const params: Record<string, any> = { template: 1 };
+      if (storage) params.storage = storage;
+      
+      await makeRequest<void>("post", `/nodes/${node}/lxc/${vmid}`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Template created from container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating template: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete template
+server.registerTool(
+  "delete_template",
+  {
+    description: "Delete a template from Proxmox",
+    inputSchema: {
+      node: z.string().describe("Node where template is located"),
+      vmid: z.number().describe("Template ID to delete"),
+      force: z.boolean().optional().describe("Force delete"),
+    },
+  },
+  async ({ node, vmid, force }) => {
+    try {
+      const params: Record<string, any> = {};
+      if (force) params.force = "1";
+      
+      await makeRequest<void>("delete", `/nodes/${node}/qemu/${vmid}`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Template ${vmid} deleted successfully` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting template: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== Backup and Restore Tools ====================
+
+// Create VM backup
+server.registerTool(
+  "create_vm_backup",
+  {
+    description: "Create a backup of a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID to backup"),
+      storage: z.string().describe("Storage name for the backup"),
+      mode: z.enum(["stop", "suspend", "snapshot"]).optional().describe("Backup mode (stop, suspend, or snapshot)"),
+      compression: z.enum(["gzip", "bzip2", "lz4", "zstd"]).optional().describe("Compression algorithm"),
+      dumpdir: z.string().optional().describe("Backup directory"),
+      exclude: z.string().optional().describe("Exclude disks (comma-separated, e.g., 'sata0,sata1')"),
+      backupdir: z.string().optional().describe("Backup directory"),
+      stdout: z.boolean().optional().describe("Output backup to stdout"),
+      pause: z.boolean().optional().describe("Pause VM during backup"),
+      prune: z.boolean().optional().describe("Prune old backups"),
+      backupId: z.string().optional().describe("Backup ID"),
+    },
+  },
+  async ({ node, vmid, storage, mode, compression, dumpdir, exclude, backupdir, stdout, pause, prune, backupId }) => {
+    try {
+      const params: Record<string, any> = { vmid, storage };
+      if (mode) params.mode = mode;
+      if (compression) params.compression = compression;
+      if (dumpdir) params.dumpdir = dumpdir;
+      if (exclude) params.exclude = exclude;
+      if (backupdir) params.backupdir = backupdir;
+      if (stdout !== undefined) params.stdout = stdout ? "1" : "0";
+      if (pause !== undefined) params.pause = pause ? "1" : "0";
+      if (prune !== undefined) params.prune = prune ? "1" : "0";
+      if (backupId) params.backupId = backupId;
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/backup`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating VM backup: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create container backup
+server.registerTool(
+  "create_container_backup",
+  {
+    description: "Create a backup of a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID to backup"),
+      storage: z.string().describe("Storage name for the backup"),
+      mode: z.enum(["stop", "suspend", "snapshot"]).optional().describe("Backup mode (stop, suspend, or snapshot)"),
+      compression: z.enum(["gzip", "bzip2", "lz4", "zstd"]).optional().describe("Compression algorithm"),
+      dumpdir: z.string().optional().describe("Backup directory"),
+      exclude: z.string().optional().describe("Exclude volumes (comma-separated)"),
+      backupdir: z.string().optional().describe("Backup directory"),
+      stdout: z.boolean().optional().describe("Output backup to stdout"),
+      pause: z.boolean().optional().describe("Pause container during backup"),
+      prune: z.boolean().optional().describe("Prune old backups"),
+      backupId: z.string().optional().describe("Backup ID"),
+    },
+  },
+  async ({ node, vmid, storage, mode, compression, dumpdir, exclude, backupdir, stdout, pause, prune, backupId }) => {
+    try {
+      const params: Record<string, any> = { vmid, storage };
+      if (mode) params.mode = mode;
+      if (compression) params.compression = compression;
+      if (dumpdir) params.dumpdir = dumpdir;
+      if (exclude) params.exclude = exclude;
+      if (backupdir) params.backupdir = backupdir;
+      if (stdout !== undefined) params.stdout = stdout ? "1" : "0";
+      if (pause !== undefined) params.pause = pause ? "1" : "0";
+      if (prune !== undefined) params.prune = prune ? "1" : "0";
+      if (backupId) params.backupId = backupId;
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/backup`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating container backup: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List backups
+server.registerTool(
+  "list_backups",
+  {
+    description: "List available backups",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+      backupdir: z.string().optional().describe("Backup directory"),
+    },
+  },
+  async ({ node, backupdir }) => {
+    try {
+      let endpoint = `/nodes/${node}/backup`;
+      if (backupdir) {
+        endpoint = `/nodes/${node}/backup?backupdir=${encodeURIComponent(backupdir)}`;
+      }
+      
+      const result = await makeRequest<{ data: { backupfile: string; vmid: number; type: string; size: number; timestamp: number; format: string; checksum: string }[] }>("get", endpoint);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing backups: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Restore VM from backup
+server.registerTool(
+  "restore_vm_backup",
+  {
+    description: "Restore a VM from backup",
+    inputSchema: {
+      node: z.string().describe("Node where backup is located"),
+      backupfile: z.string().describe("Backup file path (e.g., 'vm/100/backup.tar')"),
+      storage: z.string().describe("Target storage"),
+      format: z.enum(["tar", "vma", "raw", "qcow2", "vmdk"]).optional().describe("Backup format"),
+      unprivileged: z.boolean().optional().describe("Restore as unprivileged container"),
+      description: z.string().optional().describe("Description"),
+      full: z.boolean().optional().describe("Full restore"),
+      skiplock: z.boolean().optional().describe("Skip locks"),
+      ignoreErrors: z.boolean().optional().describe("Ignore errors"),
+    },
+  },
+  async ({ node, backupfile, storage, format, unprivileged, description, full, skiplock, ignoreErrors }) => {
+    try {
+      const params: Record<string, any> = { backupfile, storage };
+      if (format) params.format = format;
+      if (unprivileged !== undefined) params.unprivileged = unprivileged ? "1" : "0";
+      if (description) params.description = description;
+      if (full !== undefined) params.full = full ? "1" : "0";
+      if (skiplock !== undefined) params.skiplock = skiplock ? "1" : "0";
+      if (ignoreErrors !== undefined) params.ignoreErrors = ignoreErrors ? "1" : "0";
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/restore`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error restoring VM from backup: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Restore container from backup
+server.registerTool(
+  "restore_container_backup",
+  {
+    description: "Restore a container from backup",
+    inputSchema: {
+      node: z.string().describe("Node where backup is located"),
+      backupfile: z.string().describe("Backup file path (e.g., 'lxc/100/backup.tar')"),
+      storage: z.string().describe("Target storage"),
+      format: z.enum(["tar", "vma"]).optional().describe("Backup format"),
+      unprivileged: z.boolean().optional().describe("Restore as unprivileged container"),
+      description: z.string().optional().describe("Description"),
+      skiplock: z.boolean().optional().describe("Skip locks"),
+      ignoreErrors: z.boolean().optional().describe("Ignore errors"),
+    },
+  },
+  async ({ node, backupfile, storage, format, unprivileged, description, skiplock, ignoreErrors }) => {
+    try {
+      const params: Record<string, any> = { backupfile, storage };
+      if (format) params.format = format;
+      if (unprivileged !== undefined) params.unprivileged = unprivileged ? "1" : "0";
+      if (description) params.description = description;
+      if (skiplock !== undefined) params.skiplock = skiplock ? "1" : "0";
+      if (ignoreErrors !== undefined) params.ignoreErrors = ignoreErrors ? "1" : "0";
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/restore`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error restoring container from backup: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete backup
+server.registerTool(
+  "delete_backup",
+  {
+    description: "Delete a backup",
+    inputSchema: {
+      node: z.string().describe("Node where backup is located"),
+      backupfile: z.string().describe("Backup file path"),
+    },
+  },
+  async ({ node, backupfile }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/backup?backupfile=${encodeURIComponent(backupfile)}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Backup ${backupfile} deleted successfully` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting backup: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== HA (High Availability) Management Tools ====================
+
+// Enable HA for a VM
+server.registerTool(
+  "enable_vm_ha",
+  {
+    description: "Enable High Availability for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      group: z.string().optional().describe("HA group name"),
+      max_restart: z.number().optional().describe("Maximum number of restarts"),
+      restart_delay: z.number().optional().describe("Restart delay in seconds"),
+      state: z.enum(["started", "stopped", "fenced", "migrated"]).optional().describe("Desired state"),
+    },
+  },
+  async ({ node, vmid, group, max_restart, restart_delay, state }) => {
+    try {
+      const params: Record<string, any> = { vmid };
+      if (group) params.group = group;
+      if (max_restart !== undefined) params.max_restart = max_restart;
+      if (restart_delay !== undefined) params.restart_delay = restart_delay;
+      if (state) params.state = state;
+      
+      await makeRequest<void>("post", `/nodes/${node}/ha/resources`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `HA enabled for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error enabling HA for VM: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Enable HA for a container
+server.registerTool(
+  "enable_container_ha",
+  {
+    description: "Enable High Availability for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      group: z.string().optional().describe("HA group name"),
+      max_restart: z.number().optional().describe("Maximum number of restarts"),
+      restart_delay: z.number().optional().describe("Restart delay in seconds"),
+      state: z.enum(["started", "stopped", "fenced", "migrated"]).optional().describe("Desired state"),
+    },
+  },
+  async ({ node, vmid, group, max_restart, restart_delay, state }) => {
+    try {
+      const params: Record<string, any> = { vmid };
+      if (group) params.group = group;
+      if (max_restart !== undefined) params.max_restart = max_restart;
+      if (restart_delay !== undefined) params.restart_delay = restart_delay;
+      if (state) params.state = state;
+      
+      await makeRequest<void>("post", `/nodes/${node}/ha/resources`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `HA enabled for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error enabling HA for container: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Disable HA for a VM
+server.registerTool(
+  "disable_vm_ha",
+  {
+    description: "Disable High Availability for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/ha/resources/${vmid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `HA disabled for VM ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error disabling HA for VM: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Disable HA for a container
+server.registerTool(
+  "disable_container_ha",
+  {
+    description: "Disable High Availability for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/ha/resources/${vmid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `HA disabled for container ${vmid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error disabling HA for container: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Get HA status
+server.registerTool(
+  "get_ha_status",
+  {
+    description: "Get High Availability status",
+    inputSchema: {
+      node: z.string().describe("Node name"),
+    },
+  },
+  async ({ node }) => {
+    try {
+      const resources = await makeRequest<{ data: { id: string; type: string; group: string; state: string; managed: number }[] }>("get", `/nodes/${node}/ha/resources`);
+      const groups = await makeRequest<{ data: { name: string; max_relocate: number; max_restart: number }[] }>("get", `/nodes/${node}/ha/groups`);
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ resources, groups }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting HA status: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== Migration Support Tools ====================
+
+// Migrate a VM to another node
+server.registerTool(
+  "migrate_vm",
+  {
+    description: "Migrate a VM to another node",
+    inputSchema: {
+      node: z.string().describe("Current node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      target: z.string().describe("Target node for migration"),
+      online: z.boolean().optional().describe("Online migration (without shutdown)"),
+      force: z.boolean().optional().describe("Force migration (ignore safety checks)"),
+      stop: z.boolean().optional().describe("Stop VM after migration"),
+      stateonly: z.boolean().optional().describe("Only migrate VM state"),
+      with_local_disks: z.boolean().optional().describe("Migrate with local disks"),
+    },
+  },
+  async ({ node, vmid, target, online, force, stop, stateonly, with_local_disks }) => {
+    try {
+      const params: Record<string, any> = { target, vmid };
+      if (online !== undefined) params.online = online ? "1" : "0";
+      if (force !== undefined) params.force = force ? "1" : "0";
+      if (stop !== undefined) params.stop = stop ? "1" : "0";
+      if (stateonly !== undefined) params.stateonly = stateonly ? "1" : "0";
+      if (with_local_disks !== undefined) params.with_local_disks = with_local_disks ? "1" : "0";
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/qemu/${vmid}/migrate`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error migrating VM: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Migrate a container to another node
+server.registerTool(
+  "migrate_container",
+  {
+    description: "Migrate a container to another node",
+    inputSchema: {
+      node: z.string().describe("Current node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      target: z.string().describe("Target node for migration"),
+      online: z.boolean().optional().describe("Online migration (without shutdown)"),
+      force: z.boolean().optional().describe("Force migration (ignore safety checks)"),
+      stop: z.boolean().optional().describe("Stop container after migration"),
+      stateonly: z.boolean().optional().describe("Only migrate container state"),
+      with_local_disks: z.boolean().optional().describe("Migrate with local disks"),
+    },
+  },
+  async ({ node, vmid, target, online, force, stop, stateonly, with_local_disks }) => {
+    try {
+      const params: Record<string, any> = { target, vmid };
+      if (online !== undefined) params.online = online ? "1" : "0";
+      if (force !== undefined) params.force = force ? "1" : "0";
+      if (stop !== undefined) params.stop = stop ? "1" : "0";
+      if (stateonly !== undefined) params.stateonly = stateonly ? "1" : "0";
+      if (with_local_disks !== undefined) params.with_local_disks = with_local_disks ? "1" : "0";
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/lxc/${vmid}/migrate`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error migrating container: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== Snapshot Management Tools ====================
+
+// Create snapshot for a VM
+server.registerTool(
+  "create_vm_snapshot",
+  {
+    description: "Create a snapshot for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      snapshotname: z.string().describe("Snapshot name"),
+      description: z.string().optional().describe("Snapshot description"),
+      memory: z.boolean().optional().describe("Include VM memory in snapshot"),
+      vmstate: z.boolean().optional().describe("Include VM state in snapshot"),
+    },
+  },
+  async ({ node, vmid, snapshotname, description, memory, vmstate }) => {
+    try {
+      const params: Record<string, any> = { snapshotname };
+      if (description) params.description = description;
+      if (memory !== undefined) params.memory = memory ? "1" : "0";
+      if (vmstate !== undefined) params.vmstate = vmstate ? "1" : "0";
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/qemu/${vmid}/snapshot`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating VM snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Create snapshot for a container
+server.registerTool(
+  "create_container_snapshot",
+  {
+    description: "Create a snapshot for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      snapshotname: z.string().describe("Snapshot name"),
+      description: z.string().optional().describe("Snapshot description"),
+    },
+  },
+  async ({ node, vmid, snapshotname, description }) => {
+    try {
+      const params: Record<string, any> = { snapshotname };
+      if (description) params.description = description;
+      
+      const result = await makeRequest<{ taskid: string }>("post", `/nodes/${node}/lxc/${vmid}/snapshot`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, taskid: result.taskid }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating container snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List snapshots for a VM
+server.registerTool(
+  "list_vm_snapshots",
+  {
+    description: "List snapshots for a VM",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      const result = await makeRequest<{ data: { name: string; description: string; parent: string; snapshottime: number; vmstate: number }[] }>("get", `/nodes/${node}/qemu/${vmid}/snapshot`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing VM snapshots: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List snapshots for a container
+server.registerTool(
+  "list_container_snapshots",
+  {
+    description: "List snapshots for a container",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+    },
+  },
+  async ({ node, vmid }) => {
+    try {
+      const result = await makeRequest<{ data: { name: string; description: string; parent: string; snapshottime: number }[] }>("get", `/nodes/${node}/lxc/${vmid}/snapshot`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing container snapshots: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Restore VM snapshot
+server.registerTool(
+  "restore_vm_snapshot",
+  {
+    description: "Restore a VM snapshot",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      snapshotname: z.string().describe("Snapshot name to restore"),
+    },
+  },
+  async ({ node, vmid, snapshotname }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/qemu/${vmid}/snapshot/${snapshotname}/rollback`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `VM snapshot ${snapshotname} restored` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error restoring VM snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Restore container snapshot
+server.registerTool(
+  "restore_container_snapshot",
+  {
+    description: "Restore a container snapshot",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      snapshotname: z.string().describe("Snapshot name to restore"),
+    },
+  },
+  async ({ node, vmid, snapshotname }) => {
+    try {
+      await makeRequest<void>("post", `/nodes/${node}/lxc/${vmid}/snapshot/${snapshotname}/rollback`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Container snapshot ${snapshotname} restored` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error restoring container snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete VM snapshot
+server.registerTool(
+  "delete_vm_snapshot",
+  {
+    description: "Delete a VM snapshot",
+    inputSchema: {
+      node: z.string().describe("Node where VM is located"),
+      vmid: z.number().describe("VM ID"),
+      snapshotname: z.string().describe("Snapshot name to delete"),
+    },
+  },
+  async ({ node, vmid, snapshotname }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/qemu/${vmid}/snapshot/${snapshotname}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `VM snapshot ${snapshotname} deleted` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting VM snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete container snapshot
+server.registerTool(
+  "delete_container_snapshot",
+  {
+    description: "Delete a container snapshot",
+    inputSchema: {
+      node: z.string().describe("Node where container is located"),
+      vmid: z.number().describe("Container ID"),
+      snapshotname: z.string().describe("Snapshot name to delete"),
+    },
+  },
+  async ({ node, vmid, snapshotname }) => {
+    try {
+      await makeRequest<void>("delete", `/nodes/${node}/lxc/${vmid}/snapshot/${snapshotname}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Container snapshot ${snapshotname} deleted` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting container snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ==================== Resource Pool Management Tools ====================
+
+// Create resource pool
+server.registerTool(
+  "create_resource_pool",
+  {
+    description: "Create a new resource pool",
+    inputSchema: {
+      poolid: z.string().describe("Pool ID (unique name)"),
+      comment: z.string().optional().describe("Pool description"),
+    },
+  },
+  async ({ poolid, comment }) => {
+    try {
+      const params: Record<string, any> = { poolid };
+      if (comment) params.comment = comment;
+      
+      await makeRequest<void>("post", "/pools", params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Resource pool ${poolid} created` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error creating resource pool: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// List resource pools
+server.registerTool(
+  "list_resource_pools",
+  {
+    description: "List all resource pools",
+  },
+  async () => {
+    try {
+      const result = await makeRequest<{ data: { poolid: string; comment: string; members: number[] }[] }>("get", "/pools");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error listing resource pools: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Get resource pool status
+server.registerTool(
+  "get_resource_pool_status",
+  {
+    description: "Get status of a resource pool",
+    inputSchema: {
+      poolid: z.string().describe("Pool ID"),
+    },
+  },
+  async ({ poolid }) => {
+    try {
+      const result = await makeRequest<{ data: { poolid: string; comment: string; members: { vmid: number; type: string; name: string; status: string }[] } }>("get", `/pools/${poolid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting resource pool status: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Delete resource pool
+server.registerTool(
+  "delete_resource_pool",
+  {
+    description: "Delete a resource pool",
+    inputSchema: {
+      poolid: z.string().describe("Pool ID to delete"),
+      force: z.boolean().optional().describe("Force delete (even if pool has members)"),
+    },
+  },
+  async ({ poolid, force }) => {
+    try {
+      const params: Record<string, any> = {};
+      if (force) params.force = "1";
+      
+      await makeRequest<void>("delete", `/pools/${poolid}`, params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `Resource pool ${poolid} deleted` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error deleting resource pool: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Add VM to resource pool
+server.registerTool(
+  "add_vm_to_pool",
+  {
+    description: "Add a VM to a resource pool",
+    inputSchema: {
+      poolid: z.string().describe("Pool ID"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ poolid, vmid }) => {
+    try {
+      await makeRequest<void>("post", `/pools/${poolid}`, { vmid });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `VM ${vmid} added to pool ${poolid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error adding VM to pool: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Remove VM from resource pool
+server.registerTool(
+  "remove_vm_from_pool",
+  {
+    description: "Remove a VM from a resource pool",
+    inputSchema: {
+      poolid: z.string().describe("Pool ID"),
+      vmid: z.number().describe("VM ID"),
+    },
+  },
+  async ({ poolid, vmid }) => {
+    try {
+      await makeRequest<void>("delete", `/pools/${poolid}?vmid=${vmid}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, message: `VM ${vmid} removed from pool ${poolid}` }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error removing VM from pool: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
 // ==================== ISO Management Tools ====================
 
 // List ISO files on a node
