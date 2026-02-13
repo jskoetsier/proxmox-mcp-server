@@ -127,6 +127,7 @@ Once configured, you can use the Proxmox MCP server through your MCP client's in
 
 ### Status Tools
 - `get_node_status` - Get status of Proxmox nodes
+- `get_summary` - Get summary of Proxmox node resources
 - `get_storage_status` - Get status of Proxmox storage
 - `get_cluster_status` - Get Proxmox cluster status
 - `get_vm_status` - Get status of Proxmox VMs
@@ -187,11 +188,13 @@ Once configured, you can use the Proxmox MCP server through your MCP client's in
 
 ### Prerequisites for VM Guest Management
 
-The `create_vm` tool automatically installs and configures the Proxmox Guest Agent when `installGuestAgent` is enabled (default: true). For existing VMs, you need to:
+The `create_vm` tool enables the Proxmox Guest Agent when `installGuestAgent` is enabled (default: true). However, you still need to install the guest agent inside the VM:
 
 1. Install the Proxmox Guest Agent inside your VMs/containers
 2. For Linux VMs: `apt install qemu-guest-agent` or `yum install qemu-guest-agent`
 3. Ensure the guest agent service is running: `systemctl enable --now qemu-guest-agent`
+
+Note: The VM is created in a stopped state. You need to start it manually after creation.
 
 ### Network Interface Configuration
 

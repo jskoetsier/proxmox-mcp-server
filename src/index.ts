@@ -275,7 +275,7 @@ async function makeRequest<T>(
     throw new Error(`Proxmox API error: ${errorMsg}`);
   }
 
-  if (response.data?.data !== undefined) {
+  if (response.data?.data !== undefined && response.data?.data !== null) {
     return response.data.data;
   }
 
@@ -1558,7 +1558,19 @@ server.registerTool(
       
       if (timeout) params.timeout = timeout.toString();
 
-      const result = await makeRequest<{ data: any }>("post", `/nodes/${node}/qemu/${vmid}/agent/exec`, params);
+      const result = await makeRequest<{ data?: any } | undefined>("post", `/nodes/${node}/qemu/${vmid}/agent/exec`, params);
+      
+      if (result === undefined || result.data === undefined) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ success: true, message: "Command executed successfully (no output)" }, null, 2),
+            },
+          ],
+        };
+      }
+      
       return {
         content: [
           {
